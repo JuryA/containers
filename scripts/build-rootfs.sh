@@ -6,5 +6,5 @@ if ! command -v nix >/dev/null 2>&1; then
   exit 1
 fi
 
-nix build .#bash-rootfs-tarball
+nix --extra-experimental-features 'nix-command flakes' build .#bash-rootfs-tarball
 cp result/bash-rootfs.tar.gz app-rootfs.tar.gz
