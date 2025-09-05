@@ -1,0 +1,14 @@
+name: nix-rootfs-poc
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v27
+      - run: ./scripts/build-rootfs.sh
+      - run: docker build -t poc --build-arg BASE_SOURCE=nix -f Dockerfile.nix .
+      - run: docker run --rm poc /bin/bash -lc 'echo github test'
