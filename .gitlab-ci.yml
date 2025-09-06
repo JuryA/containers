@@ -1,0 +1,75 @@
+stages:
+  - check
+  - promote
+
+analyze_commit:
+  stage: check
+  image: alpine:3.18
+  rules:
+    - when: always
+  script:
+    - |
+      set -e
+      IMAGE_NAME=""
+      while read -r name; do
+        if printf '%s' "$CI_COMMIT_MESSAGE" | grep -iqE "\b${name}\b"; then
+          IMAGE_NAME="$name"
+          break
+        fi
+      done < tracked-images.txt
+      if [ -n "$IMAGE_NAME" ]; then
+        echo "Detected tracked image: $IMAGE_NAME"
+        echo "IMAGE_NAME=$IMAGE_NAME" > image.env
+      else
+        echo "No tracked image update in this commit."
+        echo "" > image.env
+      fi
+  artifacts:
+    reports:
+      dotenv: image.env
+
+update_image:
+  stage: promote
+  image: quay.io/skopeo/stable:latest
+  needs:
+    - job: analyze_commit
+      artifacts: true
+  when: delayed
+  start_in: '10 minutes'
+  script:
+    - |
+      set -e
+      if [ -z "$IMAGE_NAME" ]; then
+        echo "No image to update, skipping."
+        exit 0
+      fi
+      echo "Processing image: $IMAGE_NAME"
+      UPSTREAM_DIGEST=$(skopeo inspect --no-tags --format '{{.Digest}}' docker://docker.io/bitnami/${IMAGE_NAME}:latest 2>/dev/null || true)
+      CURRENT_DIGEST=$(skopeo inspect --no-tags --format '{{.Digest}}' docker://nexus.devops.usu.group/usu-shared/bitnami/${IMAGE_NAME}:latest 2>/dev/null || true)
+      if [ -n "$UPSTREAM_DIGEST" ] && [ "$UPSTREAM_DIGEST" = "$CURRENT_DIGEST" ]; then
+        echo "Upstream latest image is the same as current Nexus image. Nothing to do."
+        exit 0
+      fi
+      echo "New version detected for ${IMAGE_NAME}. Copying latest image to Nexus..."
+      skopeo copy docker://docker.io/bitnami/${IMAGE_NAME}:latest docker://nexus.devops.usu.group/usu-shared/bitnami/${IMAGE_NAME}:latest --dest-creds "$NEXUS_USERNAME:$NEXUS_PASSWORD"
+      META=$(skopeo inspect --no-tags docker://nexus.devops.usu.group/usu-shared/bitnami/${IMAGE_NAME}:latest)
+      VERSION=$(echo "$META" | grep -Po '"org.opencontainers.image.version":\s*"\K[^"\n]+')
+      if [ -z "$VERSION" ]; then
+        VERSION=$(echo "$META" | grep -Po '"(BITNAMI_IMAGE_VERSION|BITNAMI_APP_VERSION)":\s*"\K[^"\n]+')
+      fi
+      if [ -z "$VERSION" ]; then
+        echo "Failed to determine version from image metadata."
+        exit 1
+      fi
+      echo "Extracted version: $VERSION"
+      skopeo copy docker://nexus.devops.usu.group/usu-shared/bitnami/${IMAGE_NAME}:latest docker://nexus.devops.usu.group/usu-shared/bitnami/${IMAGE_NAME}:$VERSION --dest-creds "$NEXUS_USERNAME:$NEXUS_PASSWORD"
+      MAJOR=$(echo "$VERSION" | cut -d. -f1)
+      MINOR=$(echo "$VERSION" | cut -d. -f1-2)
+      if [ "$MINOR" != "$VERSION" ]; then
+        skopeo copy docker://nexus.devops.usu.group/usu-shared/bitnami/${IMAGE_NAME}:latest docker://nexus.devops.usu.group/usu-shared/bitnami/${IMAGE_NAME}:$MINOR --dest-creds "$NEXUS_USERNAME:$NEXUS_PASSWORD"
+      fi
+      if [ "$MAJOR" != "$VERSION" ]; then
+        skopeo copy docker://nexus.devops.usu.group/usu-shared/bitnami/${IMAGE_NAME}:latest docker://nexus.devops.usu.group/usu-shared/bitnami/${IMAGE_NAME}:$MAJOR --dest-creds "$NEXUS_USERNAME:$NEXUS_PASSWORD"
+      fi
+      echo "Tagged nexus.devops.usu.group/usu-shared/bitnami/${IMAGE_NAME} with tags $VERSION, $MINOR, and $MAJOR"
+
