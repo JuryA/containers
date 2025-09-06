@@ -2,12 +2,14 @@
 
 ## Mapping of Artifacts
 
+*Versions correspond to packages in `nixos-24.05` at commit `b134951a4c9f3c995fd7be05f3243f8ecd65d798`.*
+
 | Bitnami component | Source URL / tag | nixpkgs attribute | Version | Notes |
 |------------------|-----------------|-------------------|---------|------|
 | Bash | downloads.bitnami.com/files/stacksmith/bash-5.2.26-0-linux-amd64-debian-12.tar.gz | `pkgs.bash` | 5.2p32 | Same major/minor; Nix includes upstream patches. |
-| Coreutils | downloads.bitnami.com/files/stacksmith/coreutils-9.4-0-linux-amd64-debian-12.tar.gz | `pkgs.coreutils` | 9.4 | Provides `/bin/env` and other GNU tools. |
-| glibc runtime | included in Bitnami base | `pkgs.glibc` | 2.39 | Supplies dynamic loader and libc for binaries. |
-| CA certificates | Bitnami `ca-certificates` package | `pkgs.cacert` | 2024-03-11 | Populates `/etc/ssl/certs/ca-certificates.crt`. |
+| Coreutils | downloads.bitnami.com/files/stacksmith/coreutils-9.4-0-linux-amd64-debian-12.tar.gz | `pkgs.coreutils` | 9.5 | Provides `/bin/env` and other GNU tools. |
+| glibc runtime | included in Bitnami base | `pkgs.glibc` | 2.39-52 | Supplies dynamic loader and libc for binaries. |
+| CA certificates | Bitnami `ca-certificates` package | `pkgs.cacert` | 3.107 | Populates `/etc/ssl/certs/ca-certificates.crt`. |
 | (example app) Nginx | downloads.bitnami.com/files/stacksmith/nginx-1.25.5-0-linux-amd64-debian-12.tar.gz | `pkgs.nginx` | 1.24.0* | Build-time modules mirrored; pin exact commit for ABI compatibility. |
 
 \*Nixpkgs 24.05 ships Nginx 1.24.0; override to 1.25.x when available.
@@ -38,9 +40,9 @@
    FROM debian:bookworm-slim AS nix
    ADD app-rootfs.tar.gz /
 
-   FROM debian:bookworm-slim
-   ARG BASE_SOURCE
-   COPY --from=${BASE_SOURCE} / /
+   FROM ${BASE_SOURCE}
+   RUN groupadd --system --gid 1001 bitnami \
+       && useradd --system --uid 1001 --gid bitnami --shell /bin/bash bitnami
    ```
 
 ### Alternative tooling
