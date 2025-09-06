@@ -1,0 +1,4 @@
+# List of Bitnami image names to mirror
+# One image name per line
+postgresql
+redis

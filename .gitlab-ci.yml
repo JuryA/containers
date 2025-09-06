@@ -1,0 +1,101 @@
+stages:
+  - check
+  - promote
+
+analyze_commit:
+  stage: check
+  image: alpine:3.18
+  rules:
+    - when: always
+  script:
+    - |
+      set -e
+      IMAGE_NAME=""
+      while read -r name; do
+        if printf '%s' "$CI_COMMIT_MESSAGE" | grep -iqE "\b${name}\b"; then
+          IMAGE_NAME="$name"
+          break
+        fi
+      done < tracked-images.txt
+      if [ -n "$IMAGE_NAME" ]; then
+        echo "Detected tracked image: $IMAGE_NAME"
+        echo "IMAGE_NAME=$IMAGE_NAME" > image.env
+      else
+        echo "No tracked image update in this commit."
+        echo "" > image.env
+      fi
+  artifacts:
+    reports:
+      dotenv: image.env
+
+update_image:
+  stage: promote
+  image: alpine:3.18
+  needs:
+    - job: analyze_commit
+      artifacts: true
+  when: delayed
+  start_in: '10 minutes'
+  script:
+    - |
+      set -e
+      apk add --no-cache skopeo jq
+      if [ -z "$IMAGE_NAME" ]; then
+        echo "No image to update, skipping."
+        exit 0
+      fi
+      echo "Processing image: $IMAGE_NAME"
+      AUTHFILE=$(mktemp)
+      printf '{"auths": {"nexus.devops.usu.group": {"auth": "%s"}}}' "$(printf '%s' "$NEXUS_USERNAME:$NEXUS_PASSWORD" | base64)" > "$AUTHFILE"
+      UPSTREAM_DIGEST=""
+      UPSTREAM_ERROR=""
+      CURRENT_DIGEST=""
+      CURRENT_ERROR=""
+
+      UPSTREAM_DIGEST=$(skopeo inspect --no-tags --format '{{.Digest}}' docker://docker.io/bitnami/${IMAGE_NAME}:latest 2>upstream.err) || UPSTREAM_ERROR=$?
+      if [ -n "$UPSTREAM_ERROR" ]; then
+        echo "ERROR: skopeo inspect failed for upstream image: docker.io/bitnami/${IMAGE_NAME}:latest (exit code: $UPSTREAM_ERROR)"
+        cat upstream.err
+        rm -f "$AUTHFILE" upstream.err
+        exit 1
+      fi
+
+      CURRENT_DIGEST=$(skopeo inspect --no-tags --format '{{.Digest}}' docker://nexus.devops.usu.group/usu-shared/bitnami/${IMAGE_NAME}:latest --authfile "$AUTHFILE" 2>current.err) || CURRENT_ERROR=$?
+      if [ -n "$CURRENT_ERROR" ]; then
+        echo "WARNING: skopeo inspect failed for current Nexus image: nexus.devops.usu.group/usu-shared/bitnami/${IMAGE_NAME}:latest (exit code: $CURRENT_ERROR)"
+        cat current.err
+        CURRENT_DIGEST=""
+      fi
+
+      if [ -n "$UPSTREAM_DIGEST" ] && [ "$UPSTREAM_DIGEST" = "$CURRENT_DIGEST" ]; then
+        echo "Upstream latest image is the same as current Nexus image. Nothing to do."
+        rm -f "$AUTHFILE" upstream.err current.err
+        exit 0
+      fi
+      rm -f upstream.err current.err
+
+      echo "New version detected for ${IMAGE_NAME}. Copying latest image to Nexus..."
+      skopeo copy docker://docker.io/bitnami/${IMAGE_NAME}:latest docker://nexus.devops.usu.group/usu-shared/bitnami/${IMAGE_NAME}:latest --dest-authfile "$AUTHFILE"
+      META=$(skopeo inspect --no-tags docker://nexus.devops.usu.group/usu-shared/bitnami/${IMAGE_NAME}:latest --authfile "$AUTHFILE")
+      VERSION=$(echo "$META" | jq -r '.Labels["org.opencontainers.image.version"] // .Labels["BITNAMI_IMAGE_VERSION"] // .Labels["BITNAMI_APP_VERSION"] // (.Env[]? | select(startswith("BITNAMI_IMAGE_VERSION=") or startswith("BITNAMI_APP_VERSION=")) | split("=")[1]) // empty')
+      if [ -z "$VERSION" ]; then
+        echo "Failed to determine version from image metadata."
+        rm -f "$AUTHFILE"
+        exit 1
+      fi
+      echo "Extracted version: $VERSION"
+      skopeo copy docker://nexus.devops.usu.group/usu-shared/bitnami/${IMAGE_NAME}:latest docker://nexus.devops.usu.group/usu-shared/bitnami/${IMAGE_NAME}:$VERSION --dest-authfile "$AUTHFILE"
+      MAJOR=$(echo "$VERSION" | cut -d. -f1)
+      MINOR=$(echo "$VERSION" | cut -d. -f1-2)
+      TAGS="$VERSION"
+      if [ -n "$MINOR" ] && [ "$MINOR" != "$VERSION" ]; then
+        skopeo copy docker://nexus.devops.usu.group/usu-shared/bitnami/${IMAGE_NAME}:latest docker://nexus.devops.usu.group/usu-shared/bitnami/${IMAGE_NAME}:$MINOR --dest-authfile "$AUTHFILE"
+        TAGS="$TAGS, $MINOR"
+      fi
+      if [ -n "$MAJOR" ] && [ "$MAJOR" != "$VERSION" ]; then
+        skopeo copy docker://nexus.devops.usu.group/usu-shared/bitnami/${IMAGE_NAME}:latest docker://nexus.devops.usu.group/usu-shared/bitnami/${IMAGE_NAME}:$MAJOR --dest-authfile "$AUTHFILE"
+        TAGS="$TAGS, $MAJOR"
+      fi
+      echo "Tagged nexus.devops.usu.group/usu-shared/bitnami/${IMAGE_NAME} with tags $TAGS"
+      rm -f "$AUTHFILE"
+
